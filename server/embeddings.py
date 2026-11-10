@@ -1,41 +1,31 @@
-import asyncio
 import httpx
 
 OLLAMA_URL = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"
 
+async def embed(
+    input_data: str | list[str], batch_size: int = 16
+) -> list[float] | list[list[float]]:
+    is_single = isinstance(input_data, str)
+    
+    # Apply Nomic task prefixes
+    if is_single:
+        texts = [f"search_query: {input_data}"]
+    else:
+        texts = [f"search_document: {t}" for t in input_data if t and t.strip()]
 
-def embed_text(text: str) -> list[float]:
-    """Embed a single string (synchronous, used for query embedding)."""
-    response = httpx.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text},
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()["embedding"]
+    if not texts:
+        return [] if not is_single else []
 
+    all_embeddings = []
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            response = await client.post(
+                f"{OLLAMA_URL}/api/embed",
+                json={"model": EMBED_MODEL, "input": batch},
+            )
+            response.raise_for_status()
+            all_embeddings.extend(response.json()["embeddings"])
 
-async def _embed_one(client: httpx.AsyncClient, text: str) -> list[float]:
-    response = await client.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text},
-    )
-    response.raise_for_status()
-    return response.json()["embedding"]
-
-
-async def embed_texts(texts: list[str], max_concurrent: int = 8) -> list[list[float]]:
-    """Embed a list of strings concurrently — much faster than looping embed_text().
-    Use `await embed_texts(chunks)` inside async contexts (FastAPI).
-    Use `asyncio.run(embed_texts(chunks))` in plain scripts.
-    max_concurrent caps the number of in-flight requests to avoid PoolTimeout.
-    """
-    sem = asyncio.Semaphore(max_concurrent)
-
-    async def _guarded(client: httpx.AsyncClient, text: str) -> list[float]:
-        async with sem:
-            return await _embed_one(client, text)
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        return await asyncio.gather(*[_guarded(client, t) for t in texts])
+    return all_embeddings[0] if is_single else all_embeddings
